@@ -6,7 +6,7 @@ PYTHON_BIN="/usr/bin/python3"
 sudo apt update
 sudo apt install -y python3 curl
 
-curl -LsSf https://astral.sh/uv/install.sh | less
+curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
