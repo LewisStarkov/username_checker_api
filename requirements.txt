@@ -2,3 +2,4 @@ beautifulsoup4>=4.14.2
 fastapi>=0.118.2
 httpx>=0.28.1
 uvicorn>=0.37.0
+httpx[http2]
