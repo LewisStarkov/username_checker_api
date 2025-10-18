@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SERVICE_NAME="username_checker"
-REPO_URL="git@github.com:LewisStarkov/username_checker_api.git"
+REPO_URL="https://github.com/LewisStarkov/username_checker_api.git"
 APP_FILE="main.py"
 PYTHON_BIN="/usr/bin/python3"
 INSTALL_DIR="/opt/$SERVICE_NAME"
