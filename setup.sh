@@ -8,7 +8,7 @@ INSTALL_DIR="/opt/$SERVICE_NAME"
 VENV_DIR="$INSTALL_DIR/venv"
 
 sudo apt update
-sudo apt install -y git python3 python3-venv curl
+sudo apt install -y git python3 python3-venv python3-pip curl
 
 if [ ! -d "$INSTALL_DIR" ]; then
     sudo git clone "$REPO_URL" "$INSTALL_DIR"
@@ -23,21 +23,22 @@ fi
 
 source "$VENV_DIR/bin/activate"
 pip install --upgrade pip
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync
+if [ -f "$INSTALL_DIR/requirements.txt" ]; then
+    pip install -r "$INSTALL_DIR/requirements.txt"
+fi
 deactivate
 
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME.service"
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
-Description=Username Checker API (UV)
+Description=Username Checker API
 After=network.target
 
 [Service]
 Type=simple
 User=$USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV_DIR/bin/uv run $APP_FILE
+ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/$APP_FILE
 Restart=on-failure
 
 [Install]
