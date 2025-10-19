@@ -1,138 +1,167 @@
 import asyncio
-import time
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from bs4 import BeautifulSoup
 import logging
 
-FRAGMENT_URL = "https://fragment.com/username/"
+FRAGMENT_SEARCH_URL = "https://fragment.com/?query="
 THREADS = 10
 
 app = FastAPI()
-logger = logging.getLogger(__name__)
 
 
-async def scrape_username_status(
-    client: httpx.AsyncClient, username: str
-) -> str | None:
-    url = f"{FRAGMENT_URL}{username}"
+def parse_status_from_html(html: str, username: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    
+    target_username = f"@{username}"
+    rows = soup.select('tbody.tm-high-cells tr.tm-row-selectable')
+    
+    target_row = None
+    for row in rows:
+        value_el = row.select_one('.table-cell-value.tm-value')
+        if value_el and value_el.get_text(strip=True) == target_username:
+            target_row = row
+            break
+    
+    if not target_row:
+        return "not_found"
+    
+    if "js-auction-unavail" in target_row.get("class", []):
+        return "unavailable"
+    
+    status_elements = target_row.select('[class*="tm-status-"]')
+    for status_el in status_elements:
+        text = status_el.get_text(strip=True).lower()
+        
+        if "for sale" in text:
+            return "for_sale"
+        elif text == "sold":
+            return "sold"
+        elif text == "taken":
+            return "taken"
+        elif "unavailable" in text:
+            return "unavailable"
+    
+    timer = target_row.select_one('.tm-timer')
+    if timer and "left" in timer.get_text().lower():
+        return "on_auction"
+    
+    return "not_found"
+
+
+async def scrape_username_status(client: httpx.AsyncClient, username: str) -> str:
     try:
-        r = await client.get(url, timeout=20.0)
+        r = await client.get(f"{FRAGMENT_SEARCH_URL}{username}", timeout=20)
+        if r.status_code in (403, 429):
+            return "cf_blocked"
+        return parse_status_from_html(r.text, username)
     except httpx.TimeoutException:
         return "timeout"
-    except Exception as e:
-        logger.error(f"Error fetching {username}: {e}")
+    except Exception:
         return "error"
 
-    if r.status_code == 403:
-        return "cf_blocked"
 
-    try:
-        soup = BeautifulSoup(r.text, "html.parser")
-        status_section = soup.find(class_="tm-section-header-status")
-        if not status_section:
-            return "EMPTY"
+async def process_usernames(usernames: list[str]) -> dict[str, str]:
+    results = {}
+    sem = asyncio.Semaphore(THREADS)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    }
 
-        status_class = status_section.get("class", [])
-        mapping = {
-            "tm-status-taken": "taken",
-            "tm-status-avail": "for sale",
-            "tm-status-unavail": "unavailable",
-        }
-        for key, value in mapping.items():
-            if key in status_class:
-                return value
-        return "unknown"
-    except Exception as e:
-        logger.error(f"Error parsing response for {username}: {e}")
-        return "parse_error"
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, http2=True) as client:
 
+        async def bound_task(username: str):
+            async with sem:
+                results[username] = await scrape_username_status(client, username)
+                # logger.info(f"{username}={results[username]}")
 
-async def worker(
-    worker_id: int, queue: asyncio.Queue, results: dict, client: httpx.AsyncClient
-):
-    while True:
-        item = await queue.get()
-        if item is None:
-            queue.task_done()
-            break
+        await asyncio.gather(*(bound_task(u) for u in usernames))
 
-        username = item
-        start_ts = time.time()
-        try:
-            status = await scrape_username_status(client, username)
-            elapsed = time.time() - start_ts
-            results[username] = status
-            print(f"[{worker_id}] {username} → {status} ({elapsed:.2f}s)", flush=True)
-        except Exception as e:
-            logger.error(f"[{worker_id}] Error processing {username}: {e}")
-            results[username] = "error"
-        finally:
-            queue.task_done()
+    return results
 
 
 @app.get("/status")
 async def get_status():
+    """
+    Health check endpoint to verify the API is running.
+    
+    Returns:
+        dict: Status information containing:
+            - status (str): Always "ok" if the service is running
+            - message (str): Human-readable status message
+    
+    Example:
+        GET /status
+        
+        Response:
+        {
+            "status": "ok",
+            "message": "Fragment Checker API is running"
+        }
+    """
     return {"status": "ok", "message": "Fragment Checker API is running"}
 
 
 @app.post("/check")
 async def check_usernames(request: Request):
     """
-    Parameters:
-    - usernames: list of usernames to check
-
+    Check the status of multiple Telegram usernames on Fragment marketplace.
+    
+    This endpoint accepts a list of usernames and returns their current status
+    on the Fragment platform (available, for sale, taken, unavailable, etc.).
+    
+    Args:
+        request (Request): FastAPI request object containing JSON body with:
+            - usernames (list[str]): List of Telegram usernames to check (without @)
+    
     Returns:
-    - dictionary of usernames and their status
+        dict[str, str]: Dictionary mapping each username to its status:
+            - "for_sale": Username is available for purchase at a fixed price
+            - "on_auction": Username is currently being auctioned
+            - "taken": Username is already claimed by someone
+            - "sold": Username was recently sold
+            - "unavailable": Username exists but is not available for sale
+            - "not_found": Username was not found in search results
+            - "cf_blocked": Request blocked by Cloudflare (403/429)
+            - "timeout": Request timed out
+            - "error": Other error occurred during processing
+    
+    Raises:
+        HTTPException: 
+            - 400: No usernames provided in request
+            - 500: Internal server error during processing
+    
+    Example:
+        POST /check
+        Content-Type: application/json
+        
+        {
+            "usernames": ["sadish", "lewis", "nonexistent"]
+        }
+        
+        Response:
+        {
+            "sadish": "for_sale",
+            "lewis": "sold",
+            "nonexistent": "not_found"
+        }
+    
+    Note:
+        - Usernames are automatically converted to lowercase
+        - Multiple usernames are processed concurrently (max 10 parallel requests)
+        - Each request has a 20-second timeout
     """
     try:
         data = await request.json()
         usernames = data.get("usernames", [])
-
         if not usernames:
             raise HTTPException(status_code=400, detail="No usernames provided")
-
-        if len(usernames) > 500:
-            raise HTTPException(status_code=400, detail="Too many usernames (max 500)")
-
-        queue = asyncio.Queue()
-        results = {}
-
-        for username in usernames:
-            await queue.put(username.lower())
-
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-            )
-        }
-
-        async with httpx.AsyncClient(
-            http2=True, headers=headers, follow_redirects=True
-        ) as client:
-            workers = [
-                asyncio.create_task(worker(i, queue, results, client))
-                for i in range(THREADS)
-            ]
- 
-            await queue.join()
-
-            for _ in workers:
-                await queue.put(None)
-            await asyncio.gather(*workers)
-
-        logger.info(f"Processed {len(usernames)} usernames, results: {len(results)}")
-        return results
-
-    except HTTPException:
-        raise
+        return await process_usernames([u.lower() for u in usernames])
     except Exception as e:
-        logger.error(f"Error in check_usernames endpoint: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
