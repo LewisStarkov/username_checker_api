@@ -1,14 +1,16 @@
 import asyncio
 import httpx
 import uvicorn
+import logging
 from fastapi import FastAPI, Request, HTTPException
 from bs4 import BeautifulSoup
-import logging
 
 FRAGMENT_SEARCH_URL = "https://fragment.com/?query="
 THREADS = 10
 
 app = FastAPI()
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 
 def parse_status_from_html(html: str, username: str) -> str:
@@ -63,7 +65,6 @@ async def scrape_username_status(client: httpx.AsyncClient, username: str) -> st
 
 
 async def process_usernames(usernames: list[str]) -> dict[str, str]:
-    results = {}
     sem = asyncio.Semaphore(THREADS)
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -74,12 +75,13 @@ async def process_usernames(usernames: list[str]) -> dict[str, str]:
 
         async def bound_task(username: str):
             async with sem:
-                results[username] = await scrape_username_status(client, username)
-                # logger.info(f"{username}={results[username]}")
+                status = await scrape_username_status(client, username)
+                # logger.info(f"{username} - {status}")
+                return username, status
 
-        await asyncio.gather(*(bound_task(u) for u in usernames))
+        results = await asyncio.gather(*(bound_task(u) for u in usernames))
 
-    return results
+    return {username: status for username, status in results}
 
 
 @app.get("/status")
