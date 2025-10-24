@@ -36,7 +36,9 @@ def parse_status_from_html(html: str, username: str) -> str:
     for status_el in status_elements:
         text = status_el.get_text(strip=True).lower()
         
-        if "for sale" in text:
+        if "available" in text:
+            return "available"
+        elif "for sale" in text:
             return "for_sale"
         elif text == "sold":
             return "sold"
@@ -120,6 +122,7 @@ async def check_usernames(request: Request):
     
     Returns:
         dict[str, str]: Dictionary mapping each username to its status:
+            - "available": Username is available for sale or auction
             - "for_sale": Username is available for purchase at a fixed price
             - "on_auction": Username is currently being auctioned
             - "taken": Username is already claimed by someone

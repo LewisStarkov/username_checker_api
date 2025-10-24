@@ -3,3 +3,4 @@ test.py
 templates
 app.log
 .venv
+.DS_Store
