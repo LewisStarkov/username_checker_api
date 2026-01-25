@@ -47,7 +47,8 @@ draw_ui() {
             symbol="✔"
         fi
         
-        printf "\r${color}%b [%d / %d] %-50s [%s]${RESET}\033[K\n" "$symbol" "$index" "$NUM_STEPS" "${STEPS[$i]}" "${STEP_TIMES[$i]}"
+        printf "\r${color}%b [%d / %d] %-50s [%s]${RESET}\033[K\n" \
+            "$symbol" "$index" "$NUM_STEPS" "${STEPS[$i]}" "${STEP_TIMES[$i]}"
     done
 }
 
@@ -85,10 +86,33 @@ echo -e "${BOLD}Deploying $SERVICE_NAME...${RESET}\n"
 for _ in "${STEPS[@]}"; do echo ""; done
 
 run_step 0 bash -c "sudo systemctl stop $SERVICE_NAME || true; sudo systemctl disable $SERVICE_NAME || true"
+
 run_step 1 sudo rm -rf "$INSTALL_DIR"
-run_step 2 bash -c "sudo apt update -qq && sudo apt install -y -qq curl git && curl -LsSf https://astral.sh/uv/install.sh | sh"
-run_step 3 bash -c "sudo mkdir -p $INSTALL_DIR && sudo chown $USER:$USER $INSTALL_DIR && git clone $REPO_URL $INSTALL_DIR"
-run_step 4 bash -c "export PATH=\"\$HOME/.local/bin:\$PATH\" && cd $INSTALL_DIR && uv venv && uv pip install -r requirements.txt"
+
+run_step 2 bash -c "
+export DEBIAN_FRONTEND=noninteractive
+sudo apt-get -o Acquire::Retries=3 -o Acquire::ForceIPv4=true update -qq
+sudo apt-get install -y -qq --no-install-recommends curl git ca-certificates
+curl --fail -LsSf https://astral.sh/uv/install.sh | sh
+"
+
+run_step 3 bash -c "
+sudo mkdir -p $INSTALL_DIR
+sudo chown $USER:$USER $INSTALL_DIR
+timeout 10m git clone --depth 1 --filter=blob:none $REPO_URL $INSTALL_DIR
+"
+
+run_step 4 bash -c "
+export PATH=\"\$HOME/.local/bin:\$PATH\"
+export UV_CACHE_DIR=/var/cache/uv
+export UV_HTTP_TIMEOUT=180
+export UV_HTTP_RETRIES=20
+export UV_CONCURRENT_DOWNLOADS=1
+sudo mkdir -p /var/cache/uv
+sudo chown $USER:$USER /var/cache/uv
+cd $INSTALL_DIR
+timeout 60m uv sync --frozen --no-dev
+"
 
 run_step 5 sudo bash -c "cat > $SERVICE_FILE <<EOF
 [Unit]
@@ -100,14 +124,19 @@ User=$USER
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/main.py
 Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 EOF"
 
-run_step 6 bash -c "sudo systemctl daemon-reload && sudo systemctl enable $SERVICE_NAME && sudo systemctl start $SERVICE_NAME"
+run_step 6 bash -c "
+sudo systemctl daemon-reload
+sudo systemctl enable $SERVICE_NAME
+sudo systemctl restart $SERVICE_NAME
+"
 
-EXT_IP=$(curl -s ifconfig.me || echo "your_ip")
+EXT_IP=$(curl -4 -s https://api.ipify.org || echo "your_ip")
 
 echo -e "\n${GREEN}${BOLD}Successfully deployed!${RESET}"
 echo -e "=========================================="
