@@ -90,7 +90,7 @@ async def check_username(
                 return username, "cf_blocked"
 
             status = await asyncio.to_thread(parse_status_from_html, r.text, username)
-            logger.info(f"{username} - {status}")
+            # logger.info(f"{username} - {status}")
             return username, status
         except httpx.TimeoutException:
             return username, "timeout"
